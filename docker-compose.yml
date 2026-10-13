@@ -1,0 +1,254 @@
+services:
+  # Database: PostgreSQL 16
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword}
+      POSTGRES_DB: ${POSTGRES_DB:-videodb}
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-videodb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Cache & Queue: Redis 7
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 4-node MinIO Cluster with Erasure Coding
+  minio1:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    restart: unless-stopped
+    command: server http://minio{1...4}/data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniopassword123}
+    volumes:
+      - minio1_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  minio2:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    restart: unless-stopped
+    command: server http://minio{1...4}/data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniopassword123}
+    volumes:
+      - minio2_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  minio3:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    restart: unless-stopped
+    command: server http://minio{1...4}/data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniopassword123}
+    volumes:
+      - minio3_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  minio4:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    restart: unless-stopped
+    command: server http://minio{1...4}/data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniopassword123}
+    volumes:
+      - minio4_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # Origin Tier: Load balances across minio1..minio4
+  origin:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./origin/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      minio1:
+        condition: service_healthy
+      minio2:
+        condition: service_healthy
+      minio3:
+        condition: service_healthy
+      minio4:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # CDN Edge Tier: edge1 and edge2 with proxy_cache
+  edge1:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - edge1_cache:/var/cache/nginx
+    depends_on:
+      origin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  edge2:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - edge2_cache:/var/cache/nginx
+    depends_on:
+      origin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # API Service: 3 replicas, stateless
+  api:
+    build:
+      context: ./services/api
+    restart: unless-stopped
+    deploy:
+      replicas: 3
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgrespassword@postgres:5432/videodb}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://origin:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-miniopassword123}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_RAW_BUCKET: ${S3_RAW_BUCKET:-raw}
+      S3_VIDEOS_BUCKET: ${S3_VIDEOS_BUCKET:-videos}
+      JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_video_streaming_2026_secure}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-1024}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      origin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/api/whoami').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Worker Service: 2 replicas, BullMQ consumer, ffmpeg
+  worker:
+    build:
+      context: ./services/worker
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgrespassword@postgres:5432/videodb}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://origin:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-miniopassword123}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_RAW_BUCKET: ${S3_RAW_BUCKET:-raw}
+      S3_VIDEOS_BUCKET: ${S3_VIDEOS_BUCKET:-videos}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      origin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'node src/index.js' > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Frontend Web Container
+  web:
+    build:
+      context: ./services/web
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Edge Load Balancer: the ONLY service publishing host port LB_PORT
+  lb:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${LB_PORT:-8080}:80"
+    volumes:
+      - ./lb/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      edge1:
+        condition: service_healthy
+      edge2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
+  minio1_data:
+  minio2_data:
+  minio3_data:
+  minio4_data:
+  edge1_cache:
+  edge2_cache:
