@@ -255,11 +255,19 @@ app.get('/api/videos', async (req, res, next) => {
     sql += ` ORDER BY created_at DESC LIMIT $${params.length}`;
 
     const result = await query(sql, params);
-    const items = result.rows.map((row) => ({
-      ...row,
-      thumbUrl: `/hls/${row.id}/thumb.jpg`,
-      hlsUrl: `/hls/${row.id}/master.m3u8`,
-    }));
+    const items = await Promise.all(
+      result.rows.map(async (row) => {
+        const b1 = parseInt(await redis.get(`video:${row.id}:views`), 10) || 0;
+        const b2 = parseInt(await redis.get(`views:${row.id}`), 10) || 0;
+        const liveViews = String(Number(row.views || 0) + b1 + b2);
+        return {
+          ...row,
+          views: liveViews,
+          thumbUrl: `/hls/${row.id}/thumb.jpg`,
+          hlsUrl: `/hls/${row.id}/master.m3u8`,
+        };
+      })
+    );
 
     let nextCursor = null;
     if (items.length === limit) {
@@ -286,11 +294,19 @@ app.get('/api/me/videos', authMiddleware, async (req, res, next) => {
       [req.user.id]
     );
 
-    const items = result.rows.map((row) => ({
-      ...row,
-      thumbUrl: `/hls/${row.id}/thumb.jpg`,
-      hlsUrl: `/hls/${row.id}/master.m3u8`,
-    }));
+    const items = await Promise.all(
+      result.rows.map(async (row) => {
+        const b1 = parseInt(await redis.get(`video:${row.id}:views`), 10) || 0;
+        const b2 = parseInt(await redis.get(`views:${row.id}`), 10) || 0;
+        const liveViews = String(Number(row.views || 0) + b1 + b2);
+        return {
+          ...row,
+          views: liveViews,
+          thumbUrl: `/hls/${row.id}/thumb.jpg`,
+          hlsUrl: `/hls/${row.id}/master.m3u8`,
+        };
+      })
+    );
 
     res.json({ items });
   } catch (err) {
@@ -321,9 +337,17 @@ app.get('/api/videos/:id', async (req, res, next) => {
     const { id } = req.params;
     const cacheKey = `video:${id}`;
 
+    const getLiveViews = async (baseViews) => {
+      const b1 = parseInt(await redis.get(`video:${id}:views`), 10) || 0;
+      const b2 = parseInt(await redis.get(`views:${id}`), 10) || 0;
+      return String(Number(baseViews || 0) + b1 + b2);
+    };
+
     const cached = await redis.get(cacheKey);
     if (cached) {
-      return res.json(JSON.parse(cached));
+      const cachedVideo = JSON.parse(cached);
+      cachedVideo.views = await getLiveViews(cachedVideo.baseViews !== undefined ? cachedVideo.baseViews : cachedVideo.views);
+      return res.json(cachedVideo);
     }
 
     const result = await query(
@@ -337,8 +361,11 @@ app.get('/api/videos/:id', async (req, res, next) => {
     }
 
     const video = result.rows[0];
+    const liveViews = await getLiveViews(video.views);
     const payload = {
       ...video,
+      baseViews: video.views,
+      views: liveViews,
       hlsUrl: `/hls/${video.id}/master.m3u8`,
       thumbUrl: `/hls/${video.id}/thumb.jpg`,
     };
@@ -354,12 +381,17 @@ app.get('/api/videos/:id', async (req, res, next) => {
   }
 });
 
-// POST /videos/:id/view -> Redis INCR views:<id>
+// POST /videos/:id/view -> 204. Count incremented via Redis INCR video:{id}:views buffered, flushed to DB every 10s by setInterval worker.
 app.post('/api/videos/:id/view', async (req, res, next) => {
   try {
     const { id } = req.params;
-    await redis.incr(`views:${id}`);
-    res.json({ success: true });
+    await redis.incr(`video:${id}:views`);
+    await redis.del(`video:${id}`);
+    const listKeys = await redis.keys('videos:list:*');
+    if (listKeys.length > 0) {
+      await redis.del(...listKeys);
+    }
+    res.status(204).end();
   } catch (err) {
     next(err);
   }
@@ -414,6 +446,7 @@ app.delete('/api/videos/:id', authMiddleware, async (req, res, next) => {
     // 2. Invalidate caches
     await redis.del(`video:${id}`);
     await redis.del(`views:${id}`);
+    await redis.del(`video:${id}:views`);
     const listKeys = await redis.keys('videos:list:*');
     if (listKeys.length > 0) {
       await redis.del(...listKeys);

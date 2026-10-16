@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+export MSYS_NO_PATHCONV=1
+set -e
 
 # scripts/smoke-test.sh
 # End-to-end smoke test verifying:
@@ -8,7 +9,8 @@ set -euo pipefail
 # 3. GET master.m3u8 twice and assert X-Cache-Status goes MISS then HIT
 # 4. Fetch one segment and assert HTTP 200
 # 5. Call /api/whoami 12 times and assert at least 2 distinct instances answered
-# 6. Print PASS/FAIL per check, exit non-zero on any failure.
+# 6. Test view count endpoint and assert 204 + incremented views
+# 7. Print PASS/FAIL per check, exit non-zero on any failure.
 
 LB_URL="${LB_URL:-http://localhost:8080}"
 SAMPLE_VIDEO="${SAMPLE_VIDEO:-./samples/sample.mp4}"
@@ -32,8 +34,8 @@ check() {
 echo "=== STARTING SMOKE TESTS against $LB_URL ==="
 
 # Check 0: LB & Services Reachable
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$LB_URL/api/health")
-if [ "$HTTP_STATUS" -eq 200 ]; then
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$LB_URL/api/health" | tr -d '\r')
+if [ "$HTTP_STATUS" = "200" ]; then
   check "Platform Healthcheck /api/health returned 200" 0
 else
   echo "Expected 200 from /api/health, got $HTTP_STATUS"
@@ -48,7 +50,7 @@ REG_RESP=$(curl -s -X POST "$LB_URL/api/auth/register" \
   -H "Content-Type: application/json" \
   -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASS\"}")
 
-TOKEN=$(echo "$REG_RESP" | grep -o '"token":"[^"]*' | cut -d'"' -f4 || true)
+TOKEN=$(echo "$REG_RESP" | grep -o '"token":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
 if [ -n "$TOKEN" ]; then
   check "User Registration and Token Generation" 0
 else
@@ -62,7 +64,7 @@ LOGIN_RESP=$(curl -s -X POST "$LB_URL/api/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASS\"}")
 
-LOGIN_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"token":"[^"]*' | cut -d'"' -f4 || true)
+LOGIN_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"token":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
 if [ -n "$LOGIN_TOKEN" ]; then
   check "User Login and JWT Verification" 0
 else
@@ -84,7 +86,7 @@ UPLOAD_RESP=$(curl -s -X POST "$LB_URL/api/videos" \
   -F "description=Uploaded during automated smoke test" \
   -F "video=@$SAMPLE_VIDEO")
 
-VIDEO_ID=$(echo "$UPLOAD_RESP" | grep -o '"id":"[^"]*' | cut -d'"' -f4 || true)
+VIDEO_ID=$(echo "$UPLOAD_RESP" | grep -o '"id":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
 if [ -n "$VIDEO_ID" ]; then
   check "Video Upload to /api/videos (Accepted 202, ID: $VIDEO_ID)" 0
 else
@@ -100,8 +102,8 @@ PROGRESS=0
 
 while true; do
   STATUS_RESP=$(curl -s "$LB_URL/api/videos/$VIDEO_ID/status")
-  STATUS=$(echo "$STATUS_RESP" | grep -o '"status":"[^"]*' | cut -d'"' -f4 || true)
-  PROGRESS=$(echo "$STATUS_RESP" | grep -o '"progress":[0-9]*' | cut -d':' -f2 || true)
+  STATUS=$(echo "$STATUS_RESP" | grep -o '"status":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
+  PROGRESS=$(echo "$STATUS_RESP" | grep -o '"progress":[0-9]*' | cut -d':' -f2 | tr -d '\r' || true)
 
   echo "    Current status: $STATUS (progress: ${PROGRESS:-0}%)"
 
@@ -128,7 +130,7 @@ check "Transcoding completed with status ready" 0
 
 # Check 5: Verify renditions and master playlist
 VIDEO_DETAILS=$(curl -s "$LB_URL/api/videos/$VIDEO_ID")
-MASTER_URL=$(echo "$VIDEO_DETAILS" | grep -o '"hlsUrl":"[^"]*' | cut -d'"' -f4 || true)
+MASTER_URL=$(echo "$VIDEO_DETAILS" | grep -o '"hlsUrl":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
 if [ -n "$MASTER_URL" ]; then
   check "Video details returned valid HLS playlist URL" 0
 else
@@ -155,7 +157,7 @@ fi
 # Check 7: Fetch one segment and assert HTTP 200
 echo "==> Fetching 240p rendition playlist to discover segments..."
 REND_PLAYLIST=$(curl -s "$LB_URL/hls/$VIDEO_ID/240p/index.m3u8")
-FIRST_SEG=$(echo "$REND_PLAYLIST" | grep -E "\.ts$" | head -n 1 || true)
+FIRST_SEG=$(echo "$REND_PLAYLIST" | grep -E "\.ts$" | head -n 1 | tr -d '\r' || true)
 
 if [ -z "$FIRST_SEG" ]; then
   echo "No .ts segments found in playlist:"
@@ -164,8 +166,8 @@ if [ -z "$FIRST_SEG" ]; then
 fi
 
 echo "==> Fetching segment /hls/$VIDEO_ID/240p/$FIRST_SEG..."
-SEG_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$LB_URL/hls/$VIDEO_ID/240p/$FIRST_SEG")
-if [ "$SEG_HTTP_CODE" -eq 200 ]; then
+SEG_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$LB_URL/hls/$VIDEO_ID/240p/$FIRST_SEG" | tr -d '\r')
+if [ "$SEG_HTTP_CODE" = "200" ]; then
   check "Segment download returned HTTP 200" 0
 else
   echo "Segment request returned HTTP code $SEG_HTTP_CODE"
@@ -177,7 +179,7 @@ echo "==> Calling /api/whoami 12 times to verify load balancing across API repli
 INSTANCES=""
 for i in $(seq 1 12); do
   RESP=$(curl -s "$LB_URL/api/whoami")
-  INST=$(echo "$RESP" | grep -o '"instance":"[^"]*' | cut -d'"' -f4 || true)
+  INST=$(echo "$RESP" | grep -o '"instance":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
   if [ -n "$INST" ]; then
     INSTANCES="$INSTANCES $INST"
   fi
@@ -191,6 +193,25 @@ if [ "$DISTINCT_COUNT" -ge 2 ]; then
 else
   echo "Only found $DISTINCT_COUNT distinct API replica"
   check "Load balancing across multiple API instances" 1
+fi
+
+# Check 9: View count registration & real-time increment
+echo "==> Registering view for video $VIDEO_ID..."
+VIEW_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$LB_URL/api/videos/$VIDEO_ID/view" | tr -d '\r')
+if [ "$VIEW_HTTP_CODE" = "204" ]; then
+  check "View count endpoint returned HTTP 204 No Content" 0
+else
+  echo "View count endpoint returned HTTP code $VIEW_HTTP_CODE"
+  check "View count endpoint returned HTTP 204 No Content" 1
+fi
+
+UPDATED_DETAILS=$(curl -s "$LB_URL/api/videos/$VIDEO_ID")
+CURRENT_VIEWS=$(echo "$UPDATED_DETAILS" | grep -o '"views":"[^"]*' | cut -d'"' -f4 | tr -d '\r' || true)
+if [ "$CURRENT_VIEWS" = "1" ]; then
+  check "Video details reflected updated view count: 1" 0
+else
+  echo "Expected view count 1, got '$CURRENT_VIEWS' in response: $UPDATED_DETAILS"
+  check "Video details reflected updated view count: 1" 1
 fi
 
 echo ""

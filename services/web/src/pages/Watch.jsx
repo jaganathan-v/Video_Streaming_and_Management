@@ -21,6 +21,7 @@ export default function Watch() {
 
   // Fetch video details
   useEffect(() => {
+    viewCountedRef.current = false;
     fetch(`/api/videos/${id}`)
       .then((res) => {
         if (!res.ok) throw new Error('Video not found');
@@ -126,14 +127,36 @@ export default function Watch() {
         resolution: prev.resolution === 'N/A' && video.videoHeight ? `${video.videoWidth}x${video.videoHeight} (${video.videoHeight}p)` : prev.resolution,
       }));
 
-      // Register view after 5s playback
-      if (video.currentTime >= 5 && !viewCountedRef.current) {
+      // Register view after 2s playback (or 1s for short clips)
+      const threshold = video.duration && video.duration < 5 ? 1 : 2;
+      if (video.currentTime >= threshold && !video.paused && !viewCountedRef.current) {
         viewCountedRef.current = true;
-        fetch(`/api/videos/${id}/view`, { method: 'POST' }).catch(() => {});
+        fetch(`/api/videos/${id}/view`, { method: 'POST' })
+          .then(() => {
+            setVideoData((prev) => (prev ? { ...prev, views: String(Number(prev.views || 0) + 1) } : prev));
+          })
+          .catch((err) => console.error('View count error:', err));
       }
     }, 1000);
 
-    return () => clearInterval(interval);
+    const onTimeUpdate = () => {
+      const threshold = video.duration && video.duration < 5 ? 1 : 2;
+      if (video.currentTime >= threshold && !video.paused && !viewCountedRef.current) {
+        viewCountedRef.current = true;
+        fetch(`/api/videos/${id}/view`, { method: 'POST' })
+          .then(() => {
+            setVideoData((prev) => (prev ? { ...prev, views: String(Number(prev.views || 0) + 1) } : prev));
+          })
+          .catch((err) => console.error('View count error:', err));
+      }
+    };
+
+    video.addEventListener('timeupdate', onTimeUpdate);
+
+    return () => {
+      clearInterval(interval);
+      video.removeEventListener('timeupdate', onTimeUpdate);
+    };
   }, [id]);
 
   const handleQualityChange = (e) => {
